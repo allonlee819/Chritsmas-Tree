@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gesture Christmas Card</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: radial-gradient(circle at top, #1a1a1a, #000);
+            font-family: "Times New Roman", serif;
+        }
+
+        #hint {
+            position: fixed;
+            bottom: 24px;
+            width: 100%;
+            text-align: center;
+            font-family: Cinzel;
+            letter-spacing: 2px;
+            color: rgba(255, 230, 180, 0.85);
+            z-index: 10;
+        }
+
+        #upload {
+            position: fixed;
+            left: 50%;
+            bottom: 70px;
+            transform: translateX(-50%);
+            color: #f5e6b3;
+            font-family: Cinzel;
+            z-index: 10;
+        }
+
+        video {
+            position: fixed;
+            right: 12px;
+            bottom: 12px;
+            width: 140px;
+            opacity: 0.12;
+            border-radius: 10px;
+        }
+
+    </style>
+</head>
+
+<body>
+<div id="hint">用你的手，点亮这棵树</div>
+<input id="upload" type="file" accept="image/*" />
+<video id="video" autoplay playsinline></video>
+
+<script type="module">
+import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+// 引入 Three.js 附加组件，用于粒子化图片
+import { Float32BufferAttribute } from "https://unpkg.com/three@0.160.0/build/three.module.js"; 
+import {
+    FilesetResolver,
+    GestureRecognizer
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8";
+
+/* ---------------- Scene ---------------- */
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000000, 8, 18);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 2, 7);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+/* ---------------- Lights ---------------- */
+scene.add(new THREE.AmbientLight(0xffe9b0, 0.6));
+const light = new THREE.PointLight(0xfff2cc, 1.2, 20);
+light.position.set(5, 6, 5);
+scene.add(light);
+
+/* ---------------- Tree ---------------- */
+const treeGroup = new THREE.Group();
+scene.add(treeGroup);
+
+const TREE_COUNT = 3800;
+const geo = new THREE.BufferGeometry();
+const pos = new Float32Array(TREE_COUNT * 3);
+const col = new Float32Array(TREE_COUNT * 3);
+
+for (let i = 0; i < TREE_COUNT; i++) {
+    const h = Math.random() * 4;
+    const r = (1 - h / 4) * (Math.random() * 1.4);
+    const a = Math.random() * Math.PI * 2;
+
+    pos[i*3] = Math.cos(a) * r;
+    pos[i*3+1] = h;
+    pos[i*3+2] = Math.sin(a) * r;
+
+    const g = 0.8 + Math.random() * 0.2;
+    col.set([g, g*0.9, g*0.6], i*3);
+}
+
+geo.setAttribute("position", new THREE.BufferAttribute(pos,3));
+geo.setAttribute("color", new THREE.BufferAttribute(col,3));
+
+const treeMat = new THREE.PointsMaterial({
+    size: 0.035,
+    vertexColors: true,
+    transparent: true
+});
+
+const tree = new THREE.Points(geo, treeMat);
+treeGroup.add(tree);
+
+/* ---------------- Snow ---------------- */
+const snowGeo = new THREE.BufferGeometry();
+const snowCount = 1200;
+const snowPos = new Float32Array(snowCount * 3);
+
+for (let i = 0; i < snowCount; i++) {
+    snowPos[i*3] = (Math.random()-0.5)*15;
+    snowPos[i*3+1] = Math.random()*10;
+    snowPos[i*3+2] = (Math.random()-0.5)*15;
+}
+snowGeo.setAttribute("position", new THREE.BufferAttribute(snowPos,3));
+const snow = new THREE.Points(
+    snowGeo,
+    new THREE.PointsMaterial({ color: 0xffffff, size: 0.03 })
+);
+scene.add(snow);
+
+/* ---------------- Photo Particles ---------------- */
+let photoParticles = null;
+
+function createPhotoParticles(img) {
+    const c = document.createElement("canvas");
+    const ctx = c.getContext("2d");
+    c.width = c.height = 200;
+    ctx.drawImage(img,0,0,200,200);
+    const d = ctx.getImageData(0,0,200,200).data;
+
+    const p=[], colors=[];
+    for (let y=0;y<200;y+=2){
+        for (let x=0;x<200;x+=2){
+            const i=(y*200+x)*4;
+            if(d[i]>120){
+                p.push((x/200-0.5)*3,(1-y/200)*3,0);
+                colors.push(1,0.9,0.7);
+            }
+        }
+    }
+
+    const g=new THREE.BufferGeometry();
+    // 修复：原代码中缺少 THREE.Float32BufferAttribute 的导入，这里直接使用 THREE 的命名空间
+    g.setAttribute("position",new THREE.Float32BufferAttribute(p,3)); 
+    g.setAttribute("color",new THREE.Float32BufferAttribute(colors,3));
+
+    photoParticles=new THREE.Points(
+        g,
+        new THREE.PointsMaterial({
+            size:0.045,
+            vertexColors:true,
+            transparent:true
+        })
+    );
+    photoParticles.visible=false;
+    scene.add(photoParticles);
+}
+
+/* ---------------- Heart Morph ---------------- */
+function morphHeart(){
+    if (!photoParticles) return; // 添加空检查
+    const p=photoParticles.geometry.attributes.position;
+    const c=p.count;
+    for(let i=0;i<c;i++){
+        const t=(i/c)*Math.PI*2;
+        const x=16*Math.pow(Math.sin(t),3);
+        const y=13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);
+        p.setXYZ(i,x*0.05,y*0.05+1.5,0);
+    }
+    p.needsUpdate=true;
+}
+
+/* ---------------- Text ---------------- */
+let textMesh=null;
+function showText(){
+    if(textMesh)return;
+    const c=document.createElement("canvas");
+    c.width=1024;c.height=256;
+    const ctx=c.getContext("2d");
+    ctx.fillStyle="#f5e6b3";
+    ctx.font="64px Cinzel";
+    ctx.textAlign="center";
+    ctx.fillText("Merry Christmas",512,100);
+    ctx.font="28px Times New Roman";
+    ctx.globalAlpha=0.6;
+    ctx.fillText("Created by ALLON · 2025",512,170);
+
+    const tex=new THREE.CanvasTexture(c);
+    textMesh=new THREE.Mesh(
+        new THREE.PlaneGeometry(4,1),
+        new THREE.MeshBasicMaterial({map:tex,transparent:true})
+    );
+    textMesh.position.set(0,3,0);
+    scene.add(textMesh);
+}
+
+
+/* ---------------- Initialization ---------------- */
+let recognizer = null;
+const video=document.getElementById("video");
+
+async function initialize() {
+    // 1. 摄像头访问
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}});
+        video.srcObject = stream;
+    } catch (error) {
+        console.error("无法访问摄像头:", error);
+        document.getElementById("hint").textContent = "无法访问摄像头，手势功能不可用。";
+        // 即使没有摄像头，也要继续初始化 MediaPipe，但检测会失败
+    }
+
+    // 2. MediaPipe 模型加载 (必须在 async 函数中)
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+    );
+    recognizer = await GestureRecognizer.createFromOptions(vision,{
+        baseOptions:{modelAssetPath:
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/gesture_recognizer.task"},
+        runningMode:"VIDEO"
+    });
+
+    // 3. 开始检测和动画
+    detect();
+    animate();
+}
+
+
+/* ---------------- MediaPipe Detection Loop ---------------- */
+let last=-1;
+function detect(){
+    requestAnimationFrame(detect);
+    
+    if (!recognizer || video.readyState !== 4) return; // 确保识别器和视频已准备好
+
+    if(video.currentTime===last)return;
+    last=video.currentTime;
+    
+    // MediaPipe 识别
+    const r=recognizer.recognizeForVideo(video,Date.now());
+    if(!r.gestures.length)return;
+    const g=r.gestures[0][0].categoryName;
+
+    // 手势逻辑
+    if(g==="Pinch" && photoParticles){
+        photoParticles.visible=true;
+        morphHeart();
+        document.getElementById("hint").textContent = "手势: Pinch (捏合/比心) - 粒子爱心出现";
+    }
+    else if(g==="Open_Palm" && photoParticles){
+        photoParticles.visible=false;
+        document.getElementById("hint").textContent = "手势: Open_Palm (张开手掌) - 粒子隐藏";
+    }
+    else if(g==="Victory"){
+        showText();
+        document.getElementById("hint").textContent = "手势: Victory (剪刀手) - 圣诞文本出现";
+    } else {
+        document.getElementById("hint").textContent = "用你的手，点亮这棵树";
+    }
+}
+
+
+/* ---------------- Upload ---------------- */
+const upload = document.getElementById("upload");
+upload.onchange=e=>{
+    const img=new Image();
+    img.onload=()=>createPhotoParticles(img);
+    img.src=URL.createObjectURL(e.target.files[0]);
+};
+
+
+/* ---------------- Loop ---------------- */
+function animate(){
+    requestAnimationFrame(animate);
+
+    treeMat.size=0.032+Math.sin(Date.now()*0.002)*0.004;
+
+    const sp=snow.geometry.attributes.position;
+    for(let i=0;i<snowCount;i++){
+        sp.array[i*3+1]-=0.02;
+        if(sp.array[i*3+1]<0)sp.array[i*3+1]=10;
+    }
+    sp.needsUpdate=true;
+
+    renderer.render(scene,camera);
+}
+
+window.onresize=()=>{
+    camera.aspect=innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth,innerHeight);
+};
+
+// 启动程序
+initialize();
+</script>
+</body>
+</html>
