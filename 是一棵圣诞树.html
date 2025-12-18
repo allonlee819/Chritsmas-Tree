@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Luxury Particle Christmas | Hand Gesture Control</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Times+New+Roman&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --gold-light: #FFFACD; /* LemonChiffon - 高光浅金 */
+            --gold-main: #F4E4BC; /* Champagne */
+            --bg-dark: #050505;   /* 深邃黑，衬托辉光 */
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: var(--bg-dark);
+            font-family: 'Cinzel', serif;
+            user-select: none;
+        }
+
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* 隐藏视频输入，只用于AI分析 */
+        #input-video {
+            display: none; 
+        }
+
+        /* 加载遮罩 */
+        #loader {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+            color: var(--gold-light);
+            transition: opacity 1s ease;
+        }
+
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 2px solid rgba(255, 250, 205, 0.1);
+            border-top: 2px solid var(--gold-light);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+            box-shadow: 0 0 15px rgba(255, 250, 205, 0.3);
+        }
+
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* UI 提示 */
+        #ui-layer {
+            position: fixed;
+            bottom: 30px;
+            width: 100%;
+            text-align: center;
+            color: var(--gold-light);
+            z-index: 10;
+            pointer-events: none;
+            opacity: 0.7;
+            text-shadow: 0 0 10px rgba(255, 250, 205, 0.5);
+            font-size: 0.9rem;
+            letter-spacing: 2px;
+        }
+        
+        .gesture-icon {
+            display: inline-block;
+            margin: 0 10px;
+            font-family: sans-serif;
+        }
+    </style>
+    
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/+esm"
+        }
+    }
+    </script>
+</head>
+<body>
+
+    <div id="loader">
+        <div class="spinner"></div>
+        <div id="loader-text">INITIALIZING VISION AI & 3D ASSETS...</div>
+    </div>
+
+    <div id="ui-layer">
+        <span class="gesture-icon">🖐 Scatter</span>
+        <span class="gesture-icon">✊ Tree</span>
+        <span class="gesture-icon">👌 Heart</span>
+        <span class="gesture-icon">✌️ Text</span>
+    </div>
+
+    <div id="canvas-container"></div>
+    <video id="input-video" autoplay playsinline></video>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+/**
+ * CONFIGURATION & CONSTANTS
+ * 极简奢华配色方案
+ */
+const CONFIG = {
+    colors: {
+        goldLight: new THREE.Color(0xFFFACD), // LemonChiffon
+        goldMain: new THREE.Color(0xFFD700),  // Gold
+        white: new THREE.Color(0xFFFFFF),
+        trunk: new THREE.Color(0x8B6508),     // Dark Goldenrod
+        lights: [
+            new THREE.Color(0xFF0000), // Red
+            new THREE.Color(0xFFD700), // Yellow
+            new THREE.Color(0xFFFFFF)  // White
+        ]
+    },
+    counts: {
+        treeParticles: 6000,
+        snow: 1500,
+        ornamentLights: 150
+    },
+    tree: {
+        height: 18,
+        radius: 6
+    }
+};
+
+// Global State
+const state = {
+    currentGesture: 'Open_Palm', // 'Open_Palm', 'Closed_Fist', 'Pinch', 'Victory'
+    handPosition: new THREE.Vector3(0, 0, 0),
+    isTextLoaded: false,
+    font: null
+};
+
+// --- 1. SCENE SETUP (Visuals & Bloom) ---
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 28;
+camera.position.y = 2;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+// Post-Processing: Cinematic Bloom
+const renderScene = new RenderPass(scene, camera);
+// Resolution, Strength, Radius, Threshold
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+bloomPass.threshold = 0.15; // 只让亮部发光
+bloomPass.strength = 1.2;   // 辉光强度
+bloomPass.radius = 0.5;
+
+const composer = new EffectComposer(renderer);
+composer.addPass(renderScene);
+composer.addPass(bloomPass);
+
+// --- 2. ASSETS & TEXTURES ---
+function createGlowTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    grad.addColorStop(0.3, 'rgba(255, 250, 205, 0.5)'); // 淡金光晕
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(canvas);
+}
+const particleTexture = createGlowTexture();
+
+// --- 3. PARTICLE SYSTEM (The Core) ---
+// We use one massive buffer but map it to different shapes
+const geometry = new THREE.BufferGeometry();
+const posArray = new Float32Array(CONFIG.counts.treeParticles * 3);
+const colorArray = new Float32Array(CONFIG.counts.treeParticles * 3);
+const sizeArray = new Float32Array(CONFIG.counts.treeParticles);
+const targetArray = new Float32Array(CONFIG.counts.treeParticles * 3); // Where particles want to go
+
+// Init Random Scatter (Default)
+for (let i = 0; i < CONFIG.counts.treeParticles; i++) {
+    const i3 = i * 3;
+    posArray[i3] = (Math.random() - 0.5) * 60;
+    posArray[i3+1] = (Math.random() - 0.5) * 60;
+    posArray[i3+2] = (Math.random() - 0.5) * 60;
+    
+    targetArray[i3] = posArray[i3];
+    targetArray[i3+1] = posArray[i3+1];
+    targetArray[i3+2] = posArray[i3+2];
+
+    // Colors: mostly white/gold mix
+    const color = Math.random() > 0.7 ? CONFIG.colors.goldLight : CONFIG.colors.white;
+    colorArray[i3] = color.r;
+    colorArray[i3+1] = color.g;
+    colorArray[i3+2] = color.b;
+
+    sizeArray[i] = Math.random() * 0.4 + 0.1;
+}
+
+geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+geometry.setAttribute('size', new THREE.BufferAttribute(sizeArray, 1));
+
+const material = new THREE.ShaderMaterial({
+    uniforms: {
+        pointTexture: { value: particleTexture },
+        opacity: { value: 0.9 }
+    },
+    vertexShader: `
+        attribute float size;
+        varying vec3 vColor;
+        void main() {
+            vColor = color;
+            vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+            gl_PointSize = size * ( 300.0 / -mvPosition.z );
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `,
+    fragmentShader: `
+        uniform sampler2D pointTexture;
+        uniform float opacity;
+        varying vec3 vColor;
+        void main() {
+            gl_FragColor = vec4( vColor, opacity );
+            gl_FragColor = gl_FragColor * texture2D( pointTexture, gl_PointCoord );
+            if ( gl_FragColor.a < 0.1 ) discard;
+        }
+    `,
+    blending: THREE.AdditiveBlending,
+    depthTest: false,
+    transparent: true,
+    vertexColors: true
+});
+
+const particles = new THREE.Points(geometry, material);
+scene.add(particles);
+
+// --- 4. SHAPE GENERATORS ---
+
+// 🎄 Tree Shape
+function calculateTreeTargets() {
+    const colors = particles.geometry.attributes.color.array;
+    const sizes = particles.geometry.attributes.size.array;
+    
+    for (let i = 0; i < CONFIG.counts.treeParticles; i++) {
+        const i3 = i * 3;
+        
+        // 10% Trunk
+        if (i < CONFIG.counts.treeParticles * 0.1) {
+            const r = Math.random() * 1.5;
+            const theta = Math.random() * Math.PI * 2;
+            const h = (Math.random() * 4) - (CONFIG.tree.height / 2); // Bottom part
+            
+            targetArray[i3] = r * Math.cos(theta);
+            targetArray[i3+1] = h - 2; 
+            targetArray[i3+2] = r * Math.sin(theta);
+            
+            colors[i3] = CONFIG.colors.trunk.r;
+            colors[i3+1] = CONFIG.colors.trunk.g;
+            colors[i3+2] = CONFIG.colors.trunk.b;
+            sizes[i] = 0.5;
+        } else {
+            // Cone Foliage
+            const h = Math.random() * CONFIG.tree.height;
+            const hNorm = h / CONFIG.tree.height; // 0 to 1
+            const r = (1 - hNorm) * CONFIG.tree.radius * Math.random();
+            const theta = Math.random() * Math.PI * 2;
+
+            targetArray[i3] = r * Math.cos(theta);
+            targetArray[i3+1] = h - (CONFIG.tree.height / 2);
+            targetArray[i3+2] = r * Math.sin(theta);
+
+            // Layered Colors (Depth)
+            const c = Math.random() > 0.6 ? CONFIG.colors.goldLight : CONFIG.colors.white;
+            colors[i3] = c.r; colors[i3+1] = c.g; colors[i3+2] = c.b;
+            sizes[i] = Math.random() * 0.4 + 0.1;
+        }
+    }
+    particles.geometry.attributes.color.needsUpdate = true;
+    particles.geometry.attributes.size.needsUpdate = true;
+}
+
+// ❤️ Heart Shape
+function calculateHeartTargets() {
+    const colors = particles.geometry.attributes.color.array;
+    for (let i = 0; i < CONFIG.counts.treeParticles; i++) {
+        const i3 = i * 3;
+        const t = Math.random() * Math.PI * 2;
+        // Heart formula
+        const x = 16 * Math.pow(Math.sin(t), 3);
+        const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+        
+        // Add volume
+        const r = Math.random();
+        const scale = 0.8; 
+        
+        targetArray[i3] = x * scale * r;
+        targetArray[i3+1] = (y * scale * r) + 5; // Lift up
+        targetArray[i3+2] = (Math.random() - 0.5) * 4; // Thickness
+
+        // Pink/Gold Tint for Heart
+        colors[i3] = 1.0; 
+        colors[i3+1] = 0.8; 
+        colors[i3+2] = 0.8;
+    }
+    particles.geometry.attributes.color.needsUpdate = true;
+}
+
+// 🖐 Scatter
+function calculateScatterTargets() {
+    for (let i = 0; i < CONFIG.counts.treeParticles; i++) {
+        const i3 = i * 3;
+        targetArray[i3] = (Math.random() - 0.5) * 50;
+        targetArray[i3+1] = (Math.random() - 0.5) * 50;
+        targetArray[i3+2] = (Math.random() - 0.5) * 20;
+    }
+}
+
+// ✌️ Text Shape
+function calculateTextTargets() {
+    if(!state.font) return calculateScatterTargets();
+    
+    const textGeo = new TextGeometry('Merry Christmas', {
+        font: state.font,
+        size: 5,
+        height: 0.2,
+        curveSegments: 6
+    });
+    textGeo.center();
+    
+    const posAttribute = textGeo.attributes.position;
+    const count = posAttribute.count;
+    
+    for (let i = 0; i < CONFIG.counts.treeParticles; i++) {
+        const i3 = i * 3;
+        
+        // **修改点：使用随机索引，而不是取模 (i % count)**
+        // 随机选择文字几何体上的一个顶点
+        const textIndex = Math.floor(Math.random() * count); 
+        
+        targetArray[i3] = posAttribute.getX(textIndex);
+        targetArray[i3+1] = posAttribute.getY(textIndex);
+        targetArray[i3+2] = posAttribute.getZ(textIndex) + (Math.random()-0.5); // Add fuzzy depth
+    }
+    textGeo.dispose();
+    // ...
+}
+
+// --- 5. DECORATIONS (Lights & Snow & Star) ---
+
+// 💡 Dynamic Lights (Only visible in Tree mode)
+const lightsGeo = new THREE.BufferGeometry();
+const lightsPos = new Float32Array(CONFIG.counts.ornamentLights * 3);
+const lightsColor = new Float32Array(CONFIG.counts.ornamentLights * 3);
+const lightsPhase = new Float32Array(CONFIG.counts.ornamentLights); // For blinking offset
+
+for(let i=0; i<CONFIG.counts.ornamentLights; i++){
+    lightsPos[i*3] = 0; lightsPos[i*3+1] = 0; lightsPos[i*3+2] = 0; // Will attach to tree later
+    const c = CONFIG.colors.lights[Math.floor(Math.random() * CONFIG.colors.lights.length)];
+    lightsColor[i*3] = c.r; lightsColor[i*3+1] = c.g; lightsColor[i*3+2] = c.b;
+    lightsPhase[i] = Math.random() * Math.PI * 2;
+}
+
+lightsGeo.setAttribute('position', new THREE.BufferAttribute(lightsPos, 3));
+lightsGeo.setAttribute('color', new THREE.BufferAttribute(lightsColor, 3));
+lightsGeo.setAttribute('phase', new THREE.BufferAttribute(lightsPhase, 1));
+
+const lightsMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        time: { value: 0 },
+        pointTexture: { value: particleTexture }
+    },
+    vertexShader: `
+        attribute float phase;
+        varying vec3 vColor;
+        uniform float time;
+        void main() {
+            // Breathing effect logic
+            float blink = 0.5 + 0.5 * sin(time * 2.0 + phase); 
+            vColor = color * (0.5 + 0.5 * blink); // Brightness varies
+            vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+            gl_PointSize = (12.0 * blink + 5.0) * ( 100.0 / -mvPosition.z );
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `,
+    fragmentShader: `
+        varying vec3 vColor;
+        uniform sampler2D pointTexture;
+        void main() {
+            gl_FragColor = vec4( vColor, 1.0 );
+            gl_FragColor = gl_FragColor * texture2D( pointTexture, gl_PointCoord );
+        }
+    `,
+    blending: THREE.AdditiveBlending,
+    depthTest: false,
+    transparent: true,
+    vertexColors: true
+});
+
+const ornamentLights = new THREE.Points(lightsGeo, lightsMaterial);
+scene.add(ornamentLights);
+
+// 🌟 Star Topper
+const starGeo = new THREE.OctahedronGeometry(1.5, 0);
+const starMat = new THREE.MeshBasicMaterial({ color: 0xFFD700 });
+const starMesh = new THREE.Mesh(starGeo, starMat);
+// Add Halo
+const haloGeo = new THREE.RingGeometry(1.8, 2.2, 32);
+const haloMat = new THREE.MeshBasicMaterial({ color: 0xFFFACD, side: THREE.DoubleSide, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending });
+const haloMesh = new THREE.Mesh(haloGeo, haloMat);
+starMesh.add(haloMesh);
+scene.add(starMesh);
+starMesh.visible = false;
+
+// ❄️ Snow
+const snowGeo = new THREE.BufferGeometry();
+const snowPos = new Float32Array(CONFIG.counts.snow * 3);
+for(let i=0; i<CONFIG.counts.snow; i++){
+    snowPos[i*3] = (Math.random()-0.5)*80;
+    snowPos[i*3+1] = Math.random()*60 - 10;
+    snowPos[i*3+2] = (Math.random()-0.5)*40;
+}
+snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+const snowMat = new THREE.PointsMaterial({
+    color: 0xFFFFFF,
+    size: 0.4,
+    map: particleTexture,
+    transparent: true,
+    opacity: 0.6,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+});
+const snowSystem = new THREE.Points(snowGeo, snowMat);
+scene.add(snowSystem);
+
+// --- 6. MEDIAPIPE LOGIC ---
+let handLandmarker;
+let videoElement;
+
+async function initVision() {
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+    );
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+            delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numHands: 1
+    });
+
+    // Font Loading
+    const loader = new FontLoader();
+    loader.load('https://unpkg.com/three@0.160.0/examples/fonts/optimer_bold.typeface.json', function ( font ) {
+        state.font = font;
+        state.isTextLoaded = true;
+    });
+
+    // Camera Access
+    videoElement = document.getElementById("input-video");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640, height: 480 } });
+    videoElement.srcObject = stream;
+    videoElement.addEventListener("loadeddata", () => {
+        document.getElementById('loader').style.opacity = 0;
+        setTimeout(() => document.getElementById('loader').remove(), 1000);
+        animate();
+    });
+}
+
+function detectGesture(landmarks) {
+    if (!landmarks) return 'Open_Palm';
+    const lm = landmarks[0];
+    
+    // Calculate distance between Index Tip (8) and Thumb Tip (4) for Pinch
+    const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+    if (pinchDist < 0.05) return 'Pinch';
+
+    // Simple Finger States (Y relative to PIP)
+    const indexUp = lm[8].y < lm[6].y;
+    const middleUp = lm[12].y < lm[10].y;
+    const ringUp = lm[16].y < lm[14].y;
+    const pinkyUp = lm[20].y < lm[18].y;
+
+    if (!indexUp && !middleUp && !ringUp && !pinkyUp) return 'Closed_Fist';
+    if (indexUp && middleUp && !ringUp && !pinkyUp) return 'Victory'; // V sign
+    return 'Open_Palm';
+}
+
+// --- 7. ANIMATION LOOP ---
+let lastTime = 0;
+let shapeUpdateNeeded = true;
+const clock = new THREE.Clock();
+
+function animate() {
+    requestAnimationFrame(animate);
+    const time = clock.getElapsedTime();
+    const delta = time - lastTime;
+    
+    // AI Detection
+    if (handLandmarker && videoElement.currentTime !== lastTime) {
+        lastTime = videoElement.currentTime;
+        const result = handLandmarker.detectForVideo(videoElement, performance.now());
+        
+        if (result.landmarks && result.landmarks.length > 0) {
+            const newGesture = detectGesture(result.landmarks);
+            
+            if (newGesture !== state.currentGesture) {
+                state.currentGesture = newGesture;
+                shapeUpdateNeeded = true;
+            }
+
+            // Map hand palm (9) to 3D coords
+            // MediaPipe: x [0,1], y [0,1]. Three: x [-15, 15], y [-10, 10]
+            const lm = result.landmarks[0];
+            const px = (lm[9].x - 0.5) * -30; // Invert X for mirror effect
+            const py = (lm[9].y - 0.5) * -20;
+            state.handPosition.lerp(new THREE.Vector3(px, py, 0), 0.1);
+        }
+    }
+
+    // Trigger Shape Recalculation
+    if (shapeUpdateNeeded) {
+        if (state.currentGesture === 'Closed_Fist') calculateTreeTargets();
+        else if (state.currentGesture === 'Pinch') calculateHeartTargets();
+        else if (state.currentGesture === 'Victory' && state.isTextLoaded) calculateTextTargets();
+        else calculateScatterTargets();
+        shapeUpdateNeeded = false;
+    }
+
+    // Update Particles
+    const positions = particles.geometry.attributes.position.array;
+    for (let i = 0; i < CONFIG.counts.treeParticles; i++) {
+        const i3 = i * 3;
+        
+        // Swaying effect for Tree
+        let swayX = 0;
+        if (state.currentGesture === 'Closed_Fist') {
+            swayX = Math.sin(time * 2 + positions[i3+1] * 0.5) * 0.05;
+        }
+
+        // Interpolate to Target + Hand Offset
+        positions[i3] += (targetArray[i3] + state.handPosition.x + swayX - positions[i3]) * 0.08;
+        positions[i3+1] += (targetArray[i3+1] + state.handPosition.y - positions[i3+1]) * 0.08;
+        positions[i3+2] += (targetArray[i3+2] + state.handPosition.z - positions[i3+2]) * 0.08;
+    }
+    particles.geometry.attributes.position.needsUpdate = true;
+
+    // Update Decorations
+    // Lights
+    if (state.currentGesture === 'Closed_Fist') {
+        lightsMaterial.uniforms.time.value = time;
+        ornamentLights.visible = true;
+        // Snap lights to random tree particles
+        const lightPos = ornamentLights.geometry.attributes.position.array;
+        for(let i=0; i<CONFIG.counts.ornamentLights; i++){
+            // Pick a "host" particle index (pseudo random but stable)
+            const hostIdx = (i * 23) % CONFIG.counts.treeParticles;
+            const h3 = hostIdx * 3;
+            lightPos[i*3] = positions[h3];
+            lightPos[i*3+1] = positions[h3+1];
+            lightPos[i*3+2] = positions[h3+2] + 0.2; // Pop out slightly
+        }
+        ornamentLights.geometry.attributes.position.needsUpdate = true;
+
+        // Star
+        starMesh.visible = true;
+        starMesh.position.copy(state.handPosition);
+        starMesh.position.y += (CONFIG.tree.height/2); // Top of tree relative to hand
+        starMesh.rotation.y = time * 0.5;
+        haloMesh.rotation.z = -time;
+    } else {
+        ornamentLights.visible = false;
+        starMesh.visible = false;
+    }
+
+    // Snow
+    const sPos = snowSystem.geometry.attributes.position.array;
+    for(let i=0; i<CONFIG.counts.snow; i++){
+        sPos[i*3+1] -= 0.1;
+        if(sPos[i*3+1] < -20) sPos[i*3+1] = 20;
+    }
+    snowSystem.geometry.attributes.position.needsUpdate = true;
+
+    // Render
+    composer.render();
+}
+
+// Window Resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Start
+initVision();
+
+</script>
+</body>
+</html>
