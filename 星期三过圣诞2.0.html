@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gothic Cyber Xmas - Fixed & Optimized</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --pink: #FF007F; 
+            --bg-dark: #050505;   /* 深邃黑，衬托辉光 */
+        }
+        body { margin: 0; background: var(--bg); color: white; overflow: hidden; font-family: 'Cinzel', serif; }
+        
+        /* UI 界面 */
+        #ui-layer { position: absolute; top: 20px; left: 20px; z-index: 10; pointer-events: none; }
+        h1 { color: var(--gold); letter-spacing: 4px; margin: 0; font-size: 1.5rem; text-shadow: 0 0 10px var(--gold); }
+        .status { font-size: 0.8rem; color: var(--pink); margin-top: 8px; border: 1px solid var(--pink); display: inline-block; padding: 4px 12px; background: rgba(0,0,0,0.6); }
+        
+        /* 控制区 */
+        #controls { position: absolute; bottom: 30px; left: 20px; z-index: 10; pointer-events: auto; }
+        .btn { 
+            background: rgba(0,0,0,0.8); border: 1px solid var(--gold); color: var(--gold); 
+            padding: 12px 24px; cursor: pointer; font-family: 'Cinzel'; font-weight: bold; 
+            transition: 0.3s; 
+        }
+        .btn:hover { background: var(--gold); color: black; box-shadow: 0 0 15px var(--gold); }
+        
+        /* 摄像头预览 */
+        #cam-preview { 
+            position: absolute; bottom: 20px; right: 20px; width: 180px; height: 135px; 
+            border: 1px solid var(--pink); transform: scaleX(-1); border-radius: 8px; 
+            overflow: hidden; opacity: 0.8; box-shadow: 0 0 10px var(--pink);
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        
+        /* 加载动画 */
+        #loader { 
+            position: fixed; inset: 0; background: #000; z-index: 100; 
+            display: flex; flex-direction: column; align-items: center; justify-content: center; 
+            transition: opacity 0.8s; 
+        }
+        .spinner {
+            width: 50px; height: 50px; border: 3px solid #333; 
+            border-top: 3px solid var(--gold); border-radius: 50%; 
+            animation: spin 1s linear infinite; margin-bottom: 20px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text { color: var(--gold); letter-spacing: 3px; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+<div id="loader">
+    <div class="spinner"></div>
+    <div class="loading-text" id="load-text">INITIALIZING NEURAL ENGINE...</div>
+</div>
+
+<div id="ui-layer">
+    <h1>GOTHIC XMAS</h1>
+    <div class="status" id="status-text">SYSTEM: WAITING FOR AI</div>
+</div>
+
+<div id="controls">
+    <input type="file" id="files" multiple accept="image/*" style="display:none">
+    <button class="btn" onclick="document.getElementById('files').click()">+ UPLOAD MEMORIES</button>
+    <div style="font-size:0.7rem; color:#888; margin-top:10px;">
+        ✊握拳(聚合) | 🖐张开(散落) | 👌捏合(放大)
+    </div>
+</div>
+
+<div id="cam-preview"><video id="webcam" autoplay playsinline></video></div>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+        "tween": "https://cdnjs.cloudflare.com/ajax/libs/tween.js/20.0.0/tween.esm.js"
+    }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import TWEEN from 'tween';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8';
+
+// --- 全局变量 ---
+let scene, camera, renderer, composer, handLandmarker, video;
+let elements = [], photoNodes = [], snowSystem;
+let currentState = 'TREE'; 
+let camRotation = { x: 0, y: 0 };
+
+// --- 初始化入口 ---
+async function init() {
+    // 1. 创建场景
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x050103, 0.02); // 黑色雾气
+
+    // 2. 相机
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 5, 30);
+
+    // 3. 渲染器
+    renderer = new THREE.WebGLRenderer({ antialias: false }); // 关闭抗锯齿以提升性能(Bloom会处理边缘)
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    // 4. 后期特效 (辉光)
+    const renderScene = new RenderPass(scene, camera);
+    // 修改参数：strength(强度)从1.3提到1.8, radius(半径)从0.5提到0.6, threshold(阈值)从0.85降到0.7
+    // 这样会让更多物体产生更强烈的辉光 halo
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1, 0.6, 0.7);
+    composer = new EffectComposer(renderer);
+    composer.addPass(renderScene);
+    composer.addPass(bloomPass);
+
+    // 5. 灯光
+    const ambient = new THREE.AmbientLight(0xffffff, 0.2); // 环境光调暗
+    scene.add(ambient);
+
+
+    // 修改为：银色强光 (冷白偏蓝，模拟液态金属感)
+    // 颜色改为 0xE0E0FF (极浅的银蓝色)
+    // 强度提高到 8-10，以产生“刺穿黑暗”的强对比效果
+
+    const silverLight = new THREE.PointLight(0xE0E0FF, 10, 80); 
+    silverLight.position.set(15, 20, 15);
+    scene.add(silverLight);
+
+    // 关键补充：增加一个微弱的“暗部补光”或调整清除颜色，增强黑色的深邃感
+    renderer.setClearColor(0x020202); // 确保背景接近纯黑，产生“银黑”对比
+   
+    // 辅光：冷白色光，勾勒边缘，替代之前的粉光
+    const coldLight = new THREE.PointLight(0xF8F8FF, 3, 60);
+    coldLight.position.set(-15, -10, 15);
+    scene.add(coldLight);
+
+
+    // 6. 创建物体 (替换了之前的 initEnvironment)
+    createParticles();
+    createSnow();
+
+
+    // 7. 创建银色月牙树尖
+function createMoonTop() {
+    const moonShape = new THREE.Shape();
+    // 绘制月牙轮廓
+    moonShape.moveTo(0, 2);
+    moonShape.absarc(0, 0, 2, Math.PI * 0.4, Math.PI * 1.6, true);
+    moonShape.absarc(0.8, 0, 1.5, Math.PI * 1.4, Math.PI * 0.6, false);
+    
+    const geometry = new THREE.ExtrudeGeometry(moonShape, { depth: 0.2, bevelEnabled: true, bevelSize: 0.05 });
+    const material = new THREE.MeshPhysicalMaterial({
+        color: 0xE0E0FF,
+        emissive: 0xE0E0FF,
+        emissiveIntensity: 3.0, // 极强发光
+        metalness: 1.0,
+        roughness: 0.1
+    });
+    
+    const moon = new THREE.Mesh(geometry, material);
+    // 放置在树尖位置（假设树高 25，中心在 0，所以树尖在 13 左右）
+    moon.position.set(0, 14, 0); 
+    moon.scale.set(0.6, 0.6, 0.6);
+    scene.add(moon);
+    return moon;
+}
+window.moonTop = createMoonTop(); // 挂载到全局以便动画
+
+
+    // 8. 创建粉色螺旋光线
+function createSpiral() {
+    const points = [];
+    const radius = 10;
+    const height = 28;
+    const turns = 5; // 绕 5 圈
+    
+    for (let i = 0; i <= 200; i++) {
+        const t = i / 200;
+        const angle = t * Math.PI * 2 * turns;
+        const r = (1 - t) * radius + 1.5; // 从下往上收缩，但比树稍微宽一点
+        const x = Math.cos(angle) * r;
+        const z = Math.sin(angle) * r;
+        const y = t * height - 12;
+        points.push(new THREE.Vector3(x, y, z));
+    }
+    
+    const curve = new THREE.CatmullRomCurve3(points);
+    const tubeGeo = new THREE.TubeGeometry(curve, 200, 0.08, 8, false);
+    const tubeMat = new THREE.MeshBasicMaterial({ 
+        color: 0xFF007F,
+        transparent: true,
+        opacity: 0.8
+    });
+    
+    const spiral = new THREE.Mesh(tubeGeo, tubeMat);
+    scene.add(spiral);
+    return spiral;
+}
+window.spiralLine = createSpiral();
+
+
+    // 9. 启动 AI (耗时操作)
+    await setupAI();
+
+    // 10. 移除 Loading，开始循环
+    window.addEventListener('resize', onResize);
+    const loader = document.getElementById('loader');
+    loader.style.opacity = '0';
+    setTimeout(() => loader.remove(), 800);
+
+
+    
+    animate();
+}
+
+// --- 场景构建：银黑哥特版 ---
+function createParticles() {
+    const PALETTE = {
+        SILVER: 0xE0E0FF,      // 银色强光色
+        WHITE: 0xFFFFFF,       // 闪烁纯白
+        BLACK_GIFT: 0x050505,  // 钢琴黑礼盒
+        DEEP_GOTHIC: 0x111111, // 哥特黑钻
+        PINK: 0xFF007F,        // 霓虹粉点缀
+        DIM_GOLD: 0x8A732E     // 削减后的黯淡金色（作为极少量的点缀）
+    };
+
+    // 1. 定义几何体
+    const starGeo = new THREE.OctahedronGeometry(0.22, 1); 
+    const ballGeo = new THREE.IcosahedronGeometry(0.15, 1); 
+    const candyGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.8, 8); 
+    const boxGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3); // 黑色礼盒形状
+
+    // 调整概率分布：增加黑色和银色，极少量金色
+    // 逻辑：0-0.4 黑色礼盒，0.4-0.7 银黑粒子，0.7-0.85 纯白/银，0.85-0.9 黯淡金，0.9-1.0 粉色
+    for(let i=0; i<1400; i++) {
+        let geo, mat, color;
+        const rand = Math.random();
+
+        if (rand < 0.35) {
+            // --- 黑色钢琴漆礼盒 (35% 占比) ---
+            geo = boxGeo;
+            color = PALETTE.BLACK_GIFT;
+            mat = new THREE.MeshPhysicalMaterial({
+                color: color,
+                metalness: 0.9,
+                roughness: 0.02, // 极光滑，反射银色强光
+                clearcoat: 1.0,  // 钢琴漆质感
+                clearcoatRoughness: 0,
+                reflectivity: 1.0
+            });
+        } else if (rand < 0.15) {
+            // --- 粉色糖果 (保持不变) ---
+            geo = candyGeo;
+            color = PALETTE.PINK;
+            mat = new THREE.MeshPhysicalMaterial({
+                color: color,
+                emissive: color,
+                emissiveIntensity: 4.0,
+                metalness: 0.5,
+                roughness: 0.1
+            });
+        } else {
+            // --- 其它金属粒子 ---
+            geo = Math.random() > 0.5 ? starGeo : ballGeo;
+            
+            // 颜色权重重新分配
+            const subRand = Math.random();
+            if (subRand < 0.6) color = PALETTE.DEEP_GOTHIC; // 大量黑钻
+            else if (subRand < 0.9) color = PALETTE.SILVER; // 银色
+            else color = PALETTE.DIM_GOLD;                  // 极少量旧金色
+
+            mat = new THREE.MeshPhysicalMaterial({
+                color: color,
+                metalness: 1.0,
+                roughness: 0.05,
+                clearcoat: 0.8,
+                emissive: color,
+                // 银色和白色发射强辉光，黑色产生深邃感
+                emissiveIntensity: (color === PALETTE.SILVER) ? 2.0 : 0.1
+            });
+
+            if (color === PALETTE.DEEP_GOTHIC) {
+                mat.emissive.setHex(0x110022); // 极深紫边缘色
+            }
+        }
+
+        const mesh = new THREE.Mesh(geo, mat);
+        
+        // 赋予随机旋转，让礼盒的切面能捕捉到不同角度的银光
+        mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+
+        // 计算树形态位置 (圆锥螺旋)
+        const h = Math.random() * 25;
+        const r = (1 - h/25) * 9;
+        const theta = Math.random() * Math.PI * 2 * 12; 
+
+        //计算散开位置 (随机云)
+        mesh.userData.treePos = new THREE.Vector3(Math.cos(theta)*r, h-12, Math.sin(theta)*r);
+        mesh.userData.scatterPos = new THREE.Vector3((Math.random()-0.5)*60, (Math.random()-0.5)*50, (Math.random()-0.5)*50);
+
+        mesh.position.copy(mesh.userData.treePos); // 初始状态：树
+
+        scene.add(mesh);
+        elements.push(mesh);
+    }
+}
+
+function createSnow() {
+    const geo = new THREE.BufferGeometry();
+    const pos = [];
+    for(let i=0; i<2000; i++) {
+        pos.push((Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*80);
+    }
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.1, transparent: true, opacity: 0.6 });
+    snowSystem = new THREE.Points(geo, mat);
+    scene.add(snowSystem);
+}
+
+// --- 照片上传处理 ---
+document.getElementById('files').onchange = (e) => {
+    const files = Array.from(e.target.files).slice(0, 5);
+    // 清除旧照片
+    photoNodes.forEach(n => scene.remove(n));
+    photoNodes = [];
+    
+    files.forEach((file, i) => {
+        new THREE.TextureLoader().load(URL.createObjectURL(file), (tex) => {
+            const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4, 5.5), mat);
+            
+            // 设定位置
+            mesh.userData.treePos = new THREE.Vector3(Math.cos(i)*6, i*3-5, Math.sin(i)*6);
+            mesh.userData.scatterPos = new THREE.Vector3((Math.random()-0.5)*30, (Math.random()-0.5)*20, 15);
+            mesh.userData.type = 'photo';
+
+            mesh.position.copy(mesh.userData.treePos);
+            mesh.lookAt(0, mesh.position.y, 0); // 树状态下朝向中心
+            
+            scene.add(mesh);
+            photoNodes.push(mesh);
+        });
+    });
+};
+
+// --- AI 初始化与手势 ---
+async function setupAI() {
+    try {
+        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm");
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
+            runningMode: "VIDEO", 
+            numHands: 1
+        });
+        
+        video = document.getElementById('webcam');
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = stream;
+        
+        // 等待视频流准备好
+        return new Promise((resolve) => {
+            video.onloadeddata = () => {
+                document.getElementById('status-text').innerText = "SYSTEM: READY";
+                resolve();
+            };
+        });
+    } catch(err) {
+        document.getElementById('load-text').innerText = "AI ERROR: Check Console";
+        console.error(err);
+    }
+}
+
+// --- 状态切换核心逻辑 ---
+function switchState(newState) {
+    if(currentState === newState && newState !== 'ZOOM') return;
+    currentState = newState;
+    
+    // 更新 UI 文字
+    const label = { 'TREE': 'TREE MODE', 'SCATTER': 'CHAOS MODE', 'ZOOM': 'MEMORY LINK' };
+    document.getElementById('status-text').innerText = "SYSTEM: " + label[newState];
+
+    const allObjects = [...elements, ...photoNodes];
+    
+    allObjects.forEach(obj => {
+        const isPhoto = obj.userData.type === 'photo';
+        
+        // 1. 确定目标位置
+        let target = (newState === 'TREE') ? obj.userData.treePos : obj.userData.scatterPos;
+        
+        // 特殊：Zoom 模式下，照片飞到面前，其他粒子保持散开
+        if (newState === 'ZOOM' && isPhoto) {
+            target = new THREE.Vector3(0, 0, 22); // 面前
+        } else if (newState === 'ZOOM' && !isPhoto) {
+            target = obj.userData.scatterPos; // 背景保持散开
+        }
+
+        // 2. 位置补间动画
+        new TWEEN.Tween(obj.position)
+            .to({ x: target.x, y: target.y, z: target.z }, 1200)
+            .easing(TWEEN.Easing.Quadratic.Out)
+            .start();
+
+        // 3. 缩放与旋转 (仅针对照片)
+        if (isPhoto) {
+            const s = (newState === 'ZOOM') ? 1.5 : (newState === 'TREE' ? 0.5 : 1.0);
+            new TWEEN.Tween(obj.scale).to({ x: s, y: s, z: s }, 1000).start();
+            
+            if (newState === 'ZOOM') {
+                new TWEEN.Tween(obj.rotation).to({ x: 0, y: 0, z: 0 }, 1000).start();
+            } else if (newState === 'TREE') {
+                obj.lookAt(0, obj.position.y, 0); // 重新朝向中心
+            }
+        }
+    });
+}
+
+// --- 渲染循环 ---
+function animate() {
+    requestAnimationFrame(animate);
+    TWEEN.update();
+
+    if (window.moonTop) {
+        // 月牙自转
+        window.moonTop.rotation.y += 0.02;
+        // 随呼吸略微上下浮动
+        window.moonTop.position.y = 14 + Math.sin(Date.now() * 0.002) * 0.2;
+}
+
+    if (window.spiralLine) {
+        // 螺旋线绕 Y 轴旋转
+        window.spiralLine.rotation.y += 0.015;
+    
+        // 动态调整透明度，产生闪烁感
+        window.spiralLine.material.opacity = 0.5 + Math.sin(Date.now() * 0.005) * 0.3;
+}
+
+    // 雪花下落
+    if(snowSystem) {
+        snowSystem.position.y -= 0.05;
+        if(snowSystem.position.y < -40) snowSystem.position.y = 40;
+    }
+
+    // AI 手势识别
+    if(handLandmarker && video.readyState >= 2) {
+        const res = handLandmarker.detectForVideo(video, performance.now());
+        if(res.landmarks && res.landmarks.length > 0) {
+            const lm = res.landmarks[0];
+            
+            // 简单手势逻辑
+            const isFist = lm[8].y > lm[6].y && lm[12].y > lm[10].y; // 食指中指弯曲
+            const isOpen = lm[8].y < lm[6].y && lm[12].y < lm[10].y && lm[20].y < lm[18].y; // 五指张开
+            const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y); // 捏合距离
+
+            if (pinchDist < 0.05) switchState('ZOOM');
+            else if (isOpen) switchState('SCATTER');
+            else if (isFist) switchState('TREE');
+
+            // 旋转视角
+            camRotation.x = (lm[9].x - 0.5) * -2; // 左右
+            camRotation.y = (lm[9].y - 0.5) * -1; // 上下
+        }
+    }
+
+    // 相机平滑跟随手势
+    camera.position.x += (Math.sin(camRotation.x)*30 - camera.position.x) * 0.05;
+    camera.position.y += (5 + camRotation.y*10 - camera.position.y) * 0.05;
+    camera.lookAt(0, 2, 0);
+
+    composer.render();
+}
+
+function onResize() {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// 启动程序
+init();
+</script>
+</body>
+</html>
